@@ -1,9 +1,10 @@
 import os
 import sys
 from time import time
+from collections import deque
 from StringIO import StringIO
 from dulwich.repo import Repo
-from dulwich.objects import Blob, Commit
+from dulwich.objects import Blob, Commit, Tree
 from dulwich.client import get_transport_and_path
 from dulwich.errors import NotGitRepository
 
@@ -31,13 +32,12 @@ class Bucket(object):
         self.client, self.remote_path = get_transport_and_path(remote)
 
         try:
-            r = self.repo = Repo(path)
+            self.repo = Repo(path)
             self.fetch()
         except NotGitRepository:
-            r = self.repo = self.init_repo(path)
+            self.repo = self.init_repo(path)
 
-        self.tree = r.get_object(r.get_object(r.head()).tree)
-        self.blobs = []
+        self._reset()
 
     def fetch(self):
         def determine_wants(heads):
@@ -69,7 +69,9 @@ class Bucket(object):
     def get(self, key, default=None):
         r = self.repo
         try:
-            o = r.get_object(self.tree.lookup_path(r.get_object, key)[1])
+            print key
+            _, oid = self.tree.lookup_path(r.get_object, key)
+            o = r.get_object(oid)
         except KeyError:
             return default
         return o.data
@@ -78,33 +80,64 @@ class Bucket(object):
         if not isinstance(value, str):
             raise BucketError('Value must be a string')
 
+        parts = deque(key.split('/'))
+        sha = self.tree.id
+        transversed = []
+
+        while parts:
+            p = parts.popleft()
+            transversed.append(p)
+            if not p:
+                continue
+            obj = self.repo.get_object(sha)
+            if not isinstance(obj, Tree):
+                raise BucketError('{0} is a document'.format(
+                    '/'.join(transversed)))
+            try:
+                _, sha = obj[p]
+            except KeyError:
+                tree = obj
+                break
+
+        new_trees = [(p, Tree()) for p in parts]
+        if new_trees:
+            tree = new_trees[-1]
+
         blob = Blob.from_string(value)
-        self.tree.add(key, 0100644, blob.id)
-        self.blobs.append(blob)
+        tree.add(parts[-1], 0100644, blob.id)
+        self.objects.append(blob)
+
+        name = None
+        if new_trees:
+            while new_trees:
+                n, t = new_tress.pop()
+                if name:
+
 
     def _reset(self):
-        self.blobs = []
+        r = self.repo
+        self.tree = r.get_object(r.get_object(r.head()).tree)
+        self.objects = []
+        self.objects.append(self.tree)
+        self.tree_id = self.tree.id
     rollback = _reset
 
     def commit(self, message='autocommit'):
-        before_commit = self.repo.head()
 
-        for b in self.blobs:
-            self.repo.object_store.add_object(b)
-        self.repo.object_store.add_object(self.tree)
-
-        # commit = self.repo.do_commit(message, 'test-committer', tree=self.tree.id)
+        previous_commit = self.repo.head()
+        print self.objects
+        for o in self.objects:
+            self.repo.object_store.add_object(o)
         commit = Commit()
         commit.tree = self.tree.id
-        commit.parents = [before_commit]
-        commit.author = commit.committer = 'test-committer'
+        commit.parents = [previous_commit]
+        commit.author = commit.committer = 'test-committer <foo@foo.com>'
         commit.commit_time = commit.author_time = int(time())
         commit.commit_timezone = commit.author_timezone = 0
         commit.encoding = 'UTF-8'
-        commit.message = 'autocommit'
+        commit.message = message
         self.repo.object_store.add_object(commit)
-
-        self._reset()
+        self.repo['HEAD'] = commit.id
 
         gen_pack = self.repo.object_store.generate_pack_contents
 
@@ -114,5 +147,7 @@ class Bucket(object):
         try:
             self.client.send_pack(self.remote_path, get_refs, gen_pack,
                                   progress=sys.stdout.write)
-        except:
-            self.repo['HEAD'] = before_commit
+        except Exception as e:
+            raise e
+            self.repo['HEAD'] = previous_commit
+        self._reset()
