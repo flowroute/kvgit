@@ -1,118 +1,157 @@
-import os
-import sys
-from time import time
-from StringIO import StringIO
-from dulwich.repo import Repo
-from dulwich.objects import Blob, Commit
-from dulwich.client import get_transport_and_path
-from dulwich.errors import NotGitRepository
+import time
+import pygit2
+import errors
 
 
-class BucketError(Exception):
-    pass
+def _test_key(key):
+    """
+    Raise InvalidKey exception if key has leading, trailing,
+    or double slashes.
+    """
+    if '' in key.split('/'):
+        raise errors.InvalidKey(key)
 
 
 class Bucket(object):
-    def __init__(self, name, opts):
-        self.name = name
+    def __init__(self, path, remote=None, author=None, committer=None,
+                 timezone_offset=0, credentials=None):
+        """
+        Load or initialize a repository as a bucket.
+        :param path: Local path to load. If absent, clone from remote
+            (if provided) or initialize a new git repo.
+        :param remote: (optional) Remote from which to clone. If path already
+            exists, ensures remote is equal to the local repo's remote.
+        :param author: (optional) A tuple of (user, email) to be used as author
+            in commits. Defaults to values returned by git config for user.name
+            and user.email.
+        :param commmitter: (optional) A tuple of (user, email) to be use as
+            committer in commits. Defaults to same as author.
+        :param timezone_offset: (optional) Offset from UTC in minutes.
+            Defaults to 0.
+        :param credentials: A `pygit2.Keypair` or `pygit2.UserPass` instance.
+            Required for SSH remotes.
 
+        :raises:
+            :class:`RemoteMismatch`
+        """
         try:
-            config = opts['kvgit.buckets'][name]
+            self._repo = pygit2.Repository(path)
+            if remote:
+                try:
+                    if remote != self._repo.remotes[0].url:
+                        raise errors.RemoteMismatch(
+                            '{} is not the same as '
+                            '{}'.format(remote, self._repo.remotes[0].url))
+                except IndexError:
+                    raise errors.RemoteMismatch('Existing path has no remote.')
+                self._remote = self._repo.remotes[0]
+                self.fetch()
         except KeyError:
-            raise BucketError('Bucket config missing')
+            if remote:
+                self._repo = pygit2.clone_repository(remote, path, bare=True,
+                                                     credentials=credentials)
+                self._remote = self._repo.remotes[0]
+            else:
+                self._repo = pygit2.init_repository(path, bare=True)
+                self._remote = None
+        c = self._repo.config
+        self._author = author or (c['user.name'], c['user.email'])
+        self._committer = committer or self._author
+        self._timezone_offset = timezone_offset
+        self._staged = {}
 
+    def _signatures(self):
+        """
+        Generate `pygit2.Signature` instances for author and committer.
+        """
+        curtime = time.time()
+        author = pygit2.Signature(self._author[0], self._author[1],
+                                  curtime, self._timezone_offset)
+        committer = pygit2.Signature(self._committer[0], self._committer[1],
+                                     curtime, self._timezone_offset)
+        return author, committer
+
+    def _navigate_tree(self, oid, path):
+        """
+        Find an OID inside a nested tree.
+        """
+        steps = path.split('/')
+        for step in steps:
+            oid = self._repo.get(oid)[step].oid
+        return oid
+
+    def __getitem__(self, key):
+        class NotFound:
+            pass
+        val = self.get(key, default=NotFound)
+        if val == NotFound:
+            raise KeyError(key)
+        return val
+
+    def __setitem__(self, key, value):
+        _test_key(key)
+        self._staged[key] = value
+
+    def get(self, key, default=None, staged=True):
+        _test_key(key)
+        if staged and key in self._staged:
+            return self._staged[key]
         try:
-            remote = config['remote']
-        except KeyError:
-            raise BucketError('Bucket remote missing from config')
-
-        path = '{0}/kvgit/{1}'.format(opts['cachedir'], name)
-
-        self.client, self.remote_path = get_transport_and_path(remote)
-
-        try:
-            r = self.repo = Repo(path)
-            self.fetch()
-        except NotGitRepository:
-            r = self.repo = self.init_repo(path)
-
-        self.tree = r.get_object(r.get_object(r.head()).tree)
-        self.blobs = []
-
-    def fetch(self):
-        def determine_wants(heads):
-            return heads.values()
-            refs = dict([(k, (v, None)) for (k, v) in heads.iteritems()])
-            return [sha1 for (sha1, revid) in refs.itervalues()]
-
-        graphwalker = self.repo.get_graph_walker()
-        f = StringIO()
-        remote_refs = self.client.fetch_pack(
-            self.remote_path,
-            determine_wants,
-            graphwalker, f.write)
-        f.seek(0)
-        self.repo.object_store.add_thin_pack(f.read, None)
-        self.repo['HEAD'] = remote_refs['refs/heads/master']
-
-    def init_repo(self, path):
-        os.makedirs(path)
-        repo = Repo.init(path)
-
-        remote_refs = self.client.fetch(
-            self.remote_path, repo,
-            determine_wants=repo.object_store.determine_wants_all)
-
-        repo['HEAD'] = remote_refs['refs/heads/master']
-        return repo
-
-    def get(self, key, default=None):
-        r = self.repo
-        try:
-            o = r.get_object(self.tree.lookup_path(r.get_object, key)[1])
+            oid = self._repo.revparse_single('master').tree.oid
+            return self._repo[self._navigate_tree(oid, key)].data
         except KeyError:
             return default
-        return o.data
 
-    def set(self, key, value):
-        if not isinstance(value, str):
-            raise BucketError('Value must be a string')
+    def update(self):
+        """
+        Update local path to remote's head.
 
-        blob = Blob.from_string(value)
-        self.tree.add(key, 0100644, blob.id)
-        self.blobs.append(blob)
+        :raises:
+            :class:`ChangesNotCommitted`
+        """
+        if self._staged:
+            raise errors.ChangesNotCommitted()
+        r = self._repo
+        r.remotes[0].fetch()
+        r.reset(r.revparse_single('refs/remotes/origin/master').oid,
+                pygit2.GIT_RESET_SOFT)
 
-    def _reset(self):
-        self.blobs = []
-    rollback = _reset
+    def rollback(self, key=None):
+        if key:
+            if key in self._staged:
+                del self._staged[key]
+        else:
+            self._staged = {}
 
-    def commit(self, message='autocommit'):
-        before_commit = self.repo.head()
-
-        for b in self.blobs:
-            self.repo.object_store.add_object(b)
-        self.repo.object_store.add_object(self.tree)
-
-        # commit = self.repo.do_commit(message, 'test-committer', tree=self.tree.id)
-        commit = Commit()
-        commit.tree = self.tree.id
-        commit.parents = [before_commit]
-        commit.author = commit.committer = 'test-committer'
-        commit.commit_time = commit.author_time = int(time())
-        commit.commit_timezone = commit.author_timezone = 0
-        commit.encoding = 'UTF-8'
-        commit.message = 'autocommit'
-        self.repo.object_store.add_object(commit)
-
-        self._reset()
-
-        gen_pack = self.repo.object_store.generate_pack_contents
-
-        def get_refs(refs):
-            return {"refs/heads/master": commit.id}
+    def commit(self, key=None, value=None, message='', tag=None, push=True):
+        author, committer = self._signatures()
+        idx = self._repo.index
+        if key and value:
+            items = ((key, value),)
+            if key in self._staged:
+                del self._staged[key]
+        else:
+            items = self._staged.items()
+        for k, v in items:
+            blob_id = self._repo.create_blob(v)
+            idx.add(pygit2.IndexEntry(k, blob_id, pygit2.GIT_FILEMODE_BLOB))
+        tree_id = idx.write_tree(self._repo)
 
         try:
-            self.client.send_pack(self.remote_path, get_refs, gen_pack,
-                                  progress=sys.stdout.write)
-        except:
-            self.repo['HEAD'] = before_commit
+            parents = [self._repo.head.target]
+        except pygit2.GitError:
+            parents = []
+        self.parents = parents
+        self._repo.create_commit('refs/heads/master', author, committer,
+                                 message, tree_id, parents)
+        self._staged = {}
+        if push and self._remote:
+            try:
+                self.push()
+            except pygit2.GitError:
+                self.update()
+                raise errors.CommitError('Push failed. Changes rolled '
+                                         'back to remote.')
+
+    def push(self):
+        self._remote.push('refs/heads/master')
