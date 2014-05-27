@@ -1,6 +1,7 @@
 import os
 import unittest
 import shutil
+import yaml
 import kvgit.bucket
 import kvgit.errors
 
@@ -27,7 +28,6 @@ class BucketTestCase(unittest.TestCase):
         path = '_test_temp/cloned.git'
         kvgit.bucket.Bucket(path=path, remote=self.test_repo_path)
         self.assertTrue(os.path.isdir(path))
-        shutil.rmtree(path)
 
     def test_init_existing(self):
         kvgit.bucket.Bucket(path=self.test_repo_path)
@@ -40,7 +40,14 @@ class BucketTestCase(unittest.TestCase):
         with self.assertRaises(kvgit.errors.RemoteMismatch):
             kvgit.bucket.Bucket(path=path, remote='foo')
 
-    def test_update_fetch(self):
+    def test_commit_after_update(self):
+        path = '_test_temp/cloned.git'
+        bucket = kvgit.bucket.Bucket(path=path, remote=self.test_repo_path)
+        bucket.commit('foo', 'bar')
+        bucket.update()
+        bucket.commit('foo', 'foo')
+
+    def test_commit_and_update(self):
         b1 = kvgit.bucket.Bucket(path='_test_temp/clone1.git',
                                  remote=self.test_repo_path)
         b2 = kvgit.bucket.Bucket(path='_test_temp/clone2.git',
@@ -60,10 +67,10 @@ class BucketTestCase(unittest.TestCase):
             b2.commit('foo', 'foo')
         self.assertEqual(b2['foo'], 'bar')
 
-    def test_key_test(self):
+    def test_check_key(self):
         for key in ('/', '//', '/foo', '/foo/bar', 'foo/', 'foo//bar'):
             with self.assertRaises(kvgit.errors.InvalidKey):
-                kvgit.bucket._test_key(key)
+                kvgit.bucket._check_key(key)
 
     def test_set(self):
         self.bucket['foo/bar'] = 'bar'
@@ -89,3 +96,28 @@ class BucketTestCase(unittest.TestCase):
         self.bucket.commit()
         self.bucket['foo'] = 'bar'
         self.assertEqual(self.bucket.get('foo', staged=False), 'foo')
+
+    def test_multiple_commits(self):
+        self.bucket.commit('foo', 'bar')
+        bucket = kvgit.bucket.Bucket(path=self.test_repo_path,
+                                     author=('test', 'test@test'))
+        bucket.commit('bar', 'foo')
+        self.assertEqual(bucket['foo'], 'bar')
+
+    def test_json_load_dump(self):
+        bucket = kvgit.bucket.JSONBucket(path=self.test_repo_path,
+                                         author=('test', 'test@test'))
+        bucket['foo'] = {'foo': 'bar'}
+        self.assertEqual(bucket.get('foo'), {'foo': 'bar'})
+        bucket.commit()
+        self.assertEqual(bucket.get('foo'), {'foo': 'bar'})
+
+    def test_yaml_load_dump(self):
+        bucket = kvgit.bucket.Bucket(path=self.test_repo_path,
+                                     author=('test', 'test@test'),
+                                     loader=yaml.load,
+                                     dumper=yaml.dump)
+        bucket['foo'] = {'foo': 'bar'}
+        self.assertEqual(bucket.get('foo'), {'foo': 'bar'})
+        bucket.commit()
+        self.assertEqual(bucket.get('foo'), {'foo': 'bar'})

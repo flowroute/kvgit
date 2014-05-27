@@ -20,3 +20,7 @@ class RemoteMismatch(BucketError):
 
 class CommitError(BucketError):
     pass
+
+
+class NoRemote(BucketError):
+    pass

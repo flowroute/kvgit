@@ -1,9 +1,10 @@
 import time
+import json
 import pygit2
 import errors
 
 
-def _test_key(key):
+def _check_key(key):
     """
     Raise InvalidKey exception if key has leading, trailing,
     or double slashes.
@@ -14,7 +15,8 @@ def _test_key(key):
 
 class Bucket(object):
     def __init__(self, path, remote=None, author=None, committer=None,
-                 timezone_offset=0, credentials=None):
+                 timezone_offset=0, credentials=None, loader=None,
+                 dumper=None):
         """
         Load or initialize a repository as a bucket.
         :param path: Local path to load. If absent, clone from remote
@@ -34,6 +36,15 @@ class Bucket(object):
         :raises:
             :class:`RemoteMismatch`
         """
+        def get_credentials(*args, **kwargs):
+            print credentials
+            return credentials
+
+        self._loader = loader
+        self._dumper = dumper
+        self._remote = None
+        self._staged = {}
+
         try:
             self._repo = pygit2.Repository(path)
             if remote:
@@ -45,20 +56,22 @@ class Bucket(object):
                 except IndexError:
                     raise errors.RemoteMismatch('Existing path has no remote.')
                 self._remote = self._repo.remotes[0]
-                self.fetch()
+                if credentials:
+                    self._remote.credentials = get_credentials
+                self.update()
         except KeyError:
             if remote:
                 self._repo = pygit2.clone_repository(remote, path, bare=True,
                                                      credentials=credentials)
                 self._remote = self._repo.remotes[0]
+                if credentials:
+                    self._remote.credentials = get_credentials
             else:
                 self._repo = pygit2.init_repository(path, bare=True)
-                self._remote = None
         c = self._repo.config
         self._author = author or (c['user.name'], c['user.email'])
         self._committer = committer or self._author
         self._timezone_offset = timezone_offset
-        self._staged = {}
 
     def _signatures(self):
         """
@@ -89,18 +102,24 @@ class Bucket(object):
         return val
 
     def __setitem__(self, key, value):
-        _test_key(key)
+        _check_key(key)
+        if self._dumper:
+            value = self._dumper(value)
         self._staged[key] = value
 
     def get(self, key, default=None, staged=True):
-        _test_key(key)
+        _check_key(key)
         if staged and key in self._staged:
-            return self._staged[key]
-        try:
-            oid = self._repo.revparse_single('master').tree.oid
-            return self._repo[self._navigate_tree(oid, key)].data
-        except KeyError:
-            return default
+            value = self._staged[key]
+        else:
+            try:
+                oid = self._repo.revparse_single('master').tree.oid
+                value = self._repo[self._navigate_tree(oid, key)].data
+            except KeyError:
+                return default
+        if self._loader:
+            value = self._loader(value)
+        return value
 
     def update(self):
         """
@@ -109,12 +128,13 @@ class Bucket(object):
         :raises:
             :class:`ChangesNotCommitted`
         """
+        if not self._remote:
+            raise errors.NoREmote()
         if self._staged:
             raise errors.ChangesNotCommitted()
-        r = self._repo
-        r.remotes[0].fetch()
-        r.reset(r.revparse_single('refs/remotes/origin/master').oid,
-                pygit2.GIT_RESET_SOFT)
+        self._remote.fetch()
+        self._repo.reset(self._repo.revparse_single(
+            'refs/remotes/origin/master').oid, pygit2.GIT_RESET_SOFT)
 
     def rollback(self, key=None):
         if key:
@@ -126,10 +146,18 @@ class Bucket(object):
     def commit(self, key=None, value=None, message='', tag=None, push=True):
         author, committer = self._signatures()
         idx = self._repo.index
+        try:
+            idx.read_tree(self._repo.head.get_object().tree.id)
+        except pygit2.GitError:
+            pass
         if key and value:
+            if self._dumper:
+                value = self._dumper(value)
             items = ((key, value),)
             if key in self._staged:
                 del self._staged[key]
+        elif not self._staged:
+            raise errors.BucketError('Nothing to commit')
         else:
             items = self._staged.items()
         for k, v in items:
@@ -141,7 +169,6 @@ class Bucket(object):
             parents = [self._repo.head.target]
         except pygit2.GitError:
             parents = []
-        self.parents = parents
         self._repo.create_commit('refs/heads/master', author, committer,
                                  message, tree_id, parents)
         self._staged = {}
@@ -149,9 +176,20 @@ class Bucket(object):
             try:
                 self.push()
             except pygit2.GitError:
+                #traceback.print_exc()
                 self.update()
                 raise errors.CommitError('Push failed. Changes rolled '
                                          'back to remote.')
 
     def push(self):
+        if not self._remote:
+            raise errors.NoREmote()
         self._remote.push('refs/heads/master')
+        self._remote.fetch()
+
+
+class JSONBucket(Bucket):
+    def __init__(self, *args, **kwargs):
+        Bucket.__init__(self, *args, **kwargs)
+        self._loader = json.loads
+        self._dumper = json.dumps
