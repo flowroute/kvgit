@@ -37,7 +37,6 @@ class Bucket(object):
             :class:`RemoteMismatch`
         """
         def get_credentials(*args, **kwargs):
-            print credentials
             return credentials
 
         self._loader = loader
@@ -176,7 +175,6 @@ class Bucket(object):
             try:
                 self.push()
             except pygit2.GitError:
-                #traceback.print_exc()
                 self.update()
                 raise errors.CommitError('Push failed. Changes rolled '
                                          'back to remote.')
