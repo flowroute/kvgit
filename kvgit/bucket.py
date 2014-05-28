@@ -19,8 +19,8 @@ class Bucket(object):
                  dumper=None):
         """
         Load or initialize a repository as a bucket.
-        :param path: Local path to load. If absent, clone from remote
-            (if provided) or initialize a new git repo.
+        :param path: Local path to load. If the path does not exist,
+            clone from remote (if provided) or initialize a new git repo.
         :param remote: (optional) Remote from which to clone. If path already
             exists, ensures remote is equal to the local repo's remote.
         :param author: (optional) A tuple of (user, email) to be used as author
@@ -93,8 +93,7 @@ class Bucket(object):
         return oid
 
     def __getitem__(self, key):
-        class NotFound:
-            pass
+        NotFound = object()
         val = self.get(key, default=NotFound)
         if val == NotFound:
             raise KeyError(key)
