@@ -58,7 +58,9 @@ class Bucket(object):
                 if credentials:
                     self._remote.credentials = get_credentials
                 self.update()
-        except KeyError:
+        except KeyError as e:
+            if e.message != path:
+                raise
             if remote:
                 self._repo = pygit2.clone_repository(remote, path, bare=True,
                                                      credentials=credentials)
@@ -142,7 +144,7 @@ class Bucket(object):
             :class:`ChangesNotCommitted`
         """
         if not self._remote:
-            raise errors.NoREmote()
+            raise errors.NoRemote()
         self._remote.fetch()
         self._repo.reset(self._repo.revparse_single(
             'refs/remotes/origin/master').oid, pygit2.GIT_RESET_SOFT)
