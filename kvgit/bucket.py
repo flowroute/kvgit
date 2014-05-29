@@ -187,6 +187,5 @@ class Bucket(object):
 
 class JSONBucket(Bucket):
     def __init__(self, *args, **kwargs):
-        Bucket.__init__(self, *args, **kwargs)
-        self._loader = json.loads
-        self._dumper = json.dumps
+        Bucket.__init__(self, *args, loader=json.loads,
+                        dumper=json.dumps, **kwargs)
