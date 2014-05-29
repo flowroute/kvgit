@@ -1,4 +1,5 @@
 import time
+import re
 import json
 import pygit2
 import errors
@@ -42,7 +43,6 @@ class Bucket(object):
         self._loader = loader
         self._dumper = dumper
         self._remote = None
-        self._staged = {}
 
         try:
             self._repo = pygit2.Repository(path)
@@ -67,6 +67,8 @@ class Bucket(object):
                     self._remote.credentials = get_credentials
             else:
                 self._repo = pygit2.init_repository(path, bare=True)
+        self._index = self._repo.index
+        self._read_tree()
         c = self._repo.config
         self._author = author or (c['user.name'], c['user.email'])
         self._committer = committer or self._author
@@ -103,21 +105,34 @@ class Bucket(object):
         _check_key(key)
         if self._dumper:
             value = self._dumper(value)
-        self._staged[key] = value
+        blob_id = self._repo.create_blob(value)
+        self._index.add(pygit2.IndexEntry(key, blob_id,
+                        pygit2.GIT_FILEMODE_BLOB))
+
+    def __delitem__(self, key):
+        self._index.remove(key)
 
     def get(self, key, default=None, staged=True):
         _check_key(key)
-        if staged and key in self._staged:
-            value = self._staged[key]
-        else:
-            try:
+        try:
+            if staged:
+                value = self._repo[self._index[key].oid].data
+            else:
                 oid = self._repo.revparse_single('master').tree.oid
                 value = self._repo[self._navigate_tree(oid, key)].data
-            except KeyError:
-                return default
+        except KeyError:
+            return default
         if self._loader:
             value = self._loader(value)
         return value
+
+    def list(self, prefix=None):
+        if prefix is None:
+            return [i.path for i in self._index]
+        if not prefix.endswith('/'):
+            prefix = prefix + '/'
+        return [re.sub('^' + prefix, '', i.path) for i in self._index
+                if i.path.startswith(prefix)]
 
     def update(self):
         """
@@ -128,48 +143,35 @@ class Bucket(object):
         """
         if not self._remote:
             raise errors.NoREmote()
-        if self._staged:
-            raise errors.ChangesNotCommitted()
         self._remote.fetch()
         self._repo.reset(self._repo.revparse_single(
             'refs/remotes/origin/master').oid, pygit2.GIT_RESET_SOFT)
+        self._read_tree()
+
+    def _read_tree(self):
+        try:
+            self._index.read_tree(self._repo.head.get_object().tree.id)
+        except pygit2.GitError:
+            pass
 
     def rollback(self, key=None):
         if key:
-            if key in self._staged:
-                del self._staged[key]
+            try:
+                self[key] = self.get(key, staged=False)
+            except KeyError:
+                self._index.remove(key)
         else:
-            self._staged = {}
+            self._read_tree()
 
-    def commit(self, key=None, value=None, message='', tag=None, push=True):
+    def commit(self, message='', push=True):
         author, committer = self._signatures()
-        idx = self._repo.index
-        try:
-            idx.read_tree(self._repo.head.get_object().tree.id)
-        except pygit2.GitError:
-            pass
-        if key and value:
-            if self._dumper:
-                value = self._dumper(value)
-            items = ((key, value),)
-            if key in self._staged:
-                del self._staged[key]
-        elif not self._staged:
-            raise errors.BucketError('Nothing to commit')
-        else:
-            items = self._staged.items()
-        for k, v in items:
-            blob_id = self._repo.create_blob(v)
-            idx.add(pygit2.IndexEntry(k, blob_id, pygit2.GIT_FILEMODE_BLOB))
-        tree_id = idx.write_tree(self._repo)
-
+        tree_id = self._index.write_tree(self._repo)
         try:
             parents = [self._repo.head.target]
         except pygit2.GitError:
             parents = []
         self._repo.create_commit('refs/heads/master', author, committer,
                                  message, tree_id, parents)
-        self._staged = {}
         if push and self._remote:
             try:
                 self.push()
