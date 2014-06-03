@@ -17,7 +17,7 @@ def _check_key(key):
 class Bucket(object):
     def __init__(self, path, remote=None, author=None, committer=None,
                  timezone_offset=0, credentials=None, loader=None,
-                 update=True, dumper=None):
+                 dumper=None, update=True):
         """
         Load or initialize a repository as a bucket.
         :param path: Local path to load. If the path does not exist,
