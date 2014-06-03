@@ -40,6 +40,16 @@ class BucketTestCase(unittest.TestCase):
         with self.assertRaises(kvgit.errors.RemoteMismatch):
             kvgit.bucket.Bucket(path=path, remote='foo')
 
+    def test_update_uncommitted(self):
+        path = '_test_temp/cloned.git'
+        bucket = kvgit.bucket.Bucket(path=path, remote=self.test_repo_path)
+        bucket['foo'] = 'bar'
+        bucket.commit()
+        bucket.update()
+        bucket['foo'] = 'biz'
+        with self.assertRaises(kvgit.errors.ChangesNotCommitted):
+            bucket.update()
+
     def test_commit_after_update(self):
         path = '_test_temp/cloned.git'
         bucket = kvgit.bucket.Bucket(path=path, remote=self.test_repo_path)

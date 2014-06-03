@@ -17,7 +17,7 @@ def _check_key(key):
 class Bucket(object):
     def __init__(self, path, remote=None, author=None, committer=None,
                  timezone_offset=0, credentials=None, loader=None,
-                 dumper=None):
+                 update=True, dumper=None):
         """
         Load or initialize a repository as a bucket.
         :param path: Local path to load. If the path does not exist,
@@ -57,7 +57,8 @@ class Bucket(object):
                 self._remote = self._repo.remotes[0]
                 if credentials:
                     self._remote.credentials = get_credentials
-                self.update()
+                if update:
+                    self.update()
         except KeyError as e:
             if e.message != path:
                 raise
@@ -136,7 +137,7 @@ class Bucket(object):
         return [re.sub('^' + prefix, '', i.path) for i in self._index
                 if i.path.startswith(prefix)]
 
-    def update(self):
+    def update(self, force=False):
         """
         Update local path to remote's head.
 
@@ -145,6 +146,13 @@ class Bucket(object):
         """
         if not self._remote:
             raise errors.NoRemote()
+        try:
+            if self._index.diff_to_tree(
+                self._repo.head.get_object().tree
+            ) and not force:
+                raise errors.ChangesNotCommitted
+        except pygit2.GitError:
+            pass
         self._remote.fetch()
         self._repo.reset(self._repo.revparse_single(
             'refs/remotes/origin/master').oid, pygit2.GIT_RESET_SOFT)
