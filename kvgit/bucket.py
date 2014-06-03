@@ -57,8 +57,10 @@ class Bucket(object):
                 self._remote = self._repo.remotes[0]
                 if credentials:
                     self._remote.credentials = get_credentials
-                if update:
-                    self.update()
+            self._index = self._repo.index
+            self._read_tree()
+            if update and remote:
+                self.update()
         except KeyError as e:
             if e.message != path:
                 raise
@@ -70,8 +72,8 @@ class Bucket(object):
                     self._remote.credentials = get_credentials
             else:
                 self._repo = pygit2.init_repository(path, bare=True)
-        self._index = self._repo.index
-        self._read_tree()
+            self._index = self._repo.index
+            self._read_tree()
         c = self._repo.config
         self._author = author or (c['user.name'], c['user.email'])
         self._committer = committer or self._author
